@@ -1,0 +1,292 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from stocknews import StockNews
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from statsmodels.tsa.arima.model import ARIMA
+import openai
+import datetime
+import plotly.graph_objects as go
+import pyecharts.options as opts
+from pyecharts.charts import Calendar
+from streamlit.components.v1 import html
+from alpha_vantage.fundamentaldata import FundamentalData
+
+# Set OpenAI API key
+openai.api_key = 'Your OpenAI API key'
+
+# Function to get the latest stock price
+def get_stock_price(ticker):
+    try:
+        data = yf.Ticker(ticker).history(period='1d')
+        if not data.empty:
+            return str(data.iloc[-1].Close)
+        else:
+            return "N/A"
+    except Exception as e:
+        return f"Error: {e}"
+
+# Function to calculate the Simple Moving Average (SMA)
+def calculate_SMA(ticker, window):
+    try:
+        data = yf.Ticker(ticker).history(period='1y').Close
+        return str(data.rolling(window=window).mean().iloc[-1])
+    except Exception as e:
+        return f"Error: {e}"
+
+# Function to calculate the Exponential Moving Average (EMA)
+def calculate_EMA(ticker, window):
+    try:
+        data = yf.Ticker(ticker).history(period='1y').Close
+        return str(data.ewm(span=window, adjust=False).mean().iloc[-1])
+    except Exception as e:
+        return f"Error: {e}"
+
+# Function to calculate volatility
+def calculate_volatility(ticker):
+    try:
+        stock_data = format_time_series_data(ticker)
+        stock_data['Return'] = stock_data['Close'].pct_change(fill_method=None)
+        volatility = stock_data['Return'].std()
+        return volatility
+    except Exception as e:
+        return f"Error: {e}"
+
+# Function to format time series data
+def format_time_series_data(ticker):
+    try:
+        stock_data = yf.Ticker(ticker).history(period='1y')
+        stock_data.index = pd.to_datetime(stock_data.index)
+        stock_data = stock_data.asfreq('B')  # Set frequency to business days
+        return stock_data
+    except Exception as e:
+        return pd.DataFrame()
+
+# Function to calculate the Relative Strength Index (RSI)
+def calculate_RSI(ticker, window=14):
+    try:
+        data = yf.Ticker(ticker).history(period='1y').Close
+        delta = data.diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        ema_up = up.ewm(span=window, adjust=False).mean()
+        ema_down = down.ewm(span=window, adjust=False).mean()
+        rs = ema_up / ema_down
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        volatility = calculate_volatility(ticker)
+        return f'RSI: {rsi:.2f}, Volatility: {volatility:.2%}'
+    except Exception as e:
+        return f"Error: {e}"
+
+# Function to calculate the Moving Average Convergence Divergence (MACD)
+def calculate_MACD(ticker):
+    try:
+        data = yf.Ticker(ticker).history(period='1y').Close
+        short_EMA = data.ewm(span=12, adjust=False).mean()
+        long_EMA = data.ewm(span=26, adjust=False).mean()
+        MACD = short_EMA - long_EMA
+        signal = MACD.ewm(span=9, adjust=False).mean()
+        MACD_histogram = MACD - signal
+        return f'{MACD.iloc[-1]}, {signal.iloc[-1]}, {MACD_histogram.iloc[-1]}'
+    except Exception as e:
+        return f"Error: {e}"
+
+def st_pyecharts(chart):
+    html_code = chart.render_embed()
+    html(html_code, height=600)
+
+st.title('Stock Dashboard')
+
+# User input for ticker and date range
+ticker = st.sidebar.text_input('Ticker:')
+start_date = st.sidebar.date_input('Start Date:', value=datetime.date.today() - datetime.timedelta(days=365), format='DD/MM/YYYY')
+end_date = st.sidebar.date_input('End Date:', value=datetime.date.today(), format='DD/MM/YYYY')
+forecast_end_date = st.sidebar.date_input('Forecast End Date:', value=datetime.date.today() + datetime.timedelta(days=30), format='DD/MM/YYYY')
+
+def fetch_openai_data(ticker):
+    try:
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a stock analysis assistant."},
+                {"role": "user", "content": f"Provide an analysis of the stock data for {ticker}."}
+            ]
+        )
+        return completion.choices[0].message['content']
+    except Exception as e:
+        st.error(f"Error occurred: {e}")
+        return None
+
+if ticker:
+    try:
+        # Attempt to download data from Yahoo Finance
+        data = yf.download(ticker, start=start_date, end=end_date)
+
+        if data.empty:
+            st.warning(f"No data available for the specified ticker '{ticker}' and date range.")
+            st.write(f"Possible reasons could be invalid ticker symbol or no trading activity in the specified date range.")
+        else:
+            # Display Stock Performance Metrics
+            st.header('Stock Performance Metrics:')
+            st.write(f'Current Stock Price: {get_stock_price(ticker)}')
+            st.write(f'SMA (50): {calculate_SMA(ticker, 50)}')
+            st.write(f'EMA (50): {calculate_EMA(ticker, 50)}')
+            st.write(f'{calculate_RSI(ticker)}')
+            st.write(f'MACD: {calculate_MACD(ticker)}')
+
+            st.subheader(f"Downloading data for {ticker} from {start_date} to {end_date}")
+
+            # Plot stock price using pyecharts
+            data['Date'] = data.index
+            data['Date'] = data['Date'].dt.strftime('%Y-%m-%d')
+            stock_price_data = [[row['Date'], row['Adj Close']] for _, row in data.iterrows()]
+
+            calendar_chart = (
+                Calendar()
+                .add("", stock_price_data, calendar_opts=opts.CalendarOpts(range_=str(start_date.year)))
+                .set_global_opts(
+                    title_opts=opts.TitleOpts(title=f'{ticker} Stock Prices'),
+                    visualmap_opts=opts.VisualMapOpts(
+                        max_=data['Adj Close'].max(),
+                        min_=data['Adj Close'].min(),
+                        orient="horizontal",
+                        is_piecewise=False,
+                        pos_top="230px",
+                        pos_left="100px",
+                    ),
+                    xaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(color='white')),
+                    yaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(color='white'))
+                )
+            )
+            # Plotly chart for historical prices
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(x=data.index, y=data['Adj Close'], mode='lines', name='Historical Prices'))
+            fig1.update_layout(title=f'{ticker} Historical Prices', xaxis_title='Date', yaxis_title='Price')
+
+            st_pyecharts(calendar_chart)
+            st.plotly_chart(fig1, use_container_width=True)
+
+            # Regression Analysis
+            st.subheader('Regression Analysis')
+            df = data.copy()
+            df['Target'] = df['Adj Close'].shift(-1)
+            df.dropna(inplace=True)
+            X = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+            y = df['Target']
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            model = LinearRegression()
+            model.fit(X_train, y_train)
+            predictions = model.predict(X_test)
+            mse = mean_squared_error(y_test, predictions)
+            st.write(f'Mean Squared Error: {mse}')
+
+            # Forecasting Future Prices
+            st.subheader('Forecasting Future Prices')
+            prices = data['Adj Close']
+            
+            # Ensure the index has frequency information
+            prices = prices.asfreq('B')
+
+            # Fit the ARIMA model on the entire dataset for forecasting
+            model = ARIMA(prices, order=(5, 1, 0))
+            fitted_model = model.fit()
+
+            # Forecast up to the specified forecast end date
+            forecast_periods = (forecast_end_date - end_date).days
+            forecast = fitted_model.forecast(steps=forecast_periods)
+
+            # Prepare data for plotting
+            forecast_dates = pd.date_range(start=end_date + pd.Timedelta(days=1), periods=forecast_periods, freq='B')
+            forecast_series = pd.Series(forecast, index=forecast_dates)
+
+            # Create interactive plot using pyecharts
+            forecast_data = [[str(date), price] for date, price in zip(forecast_series.index, forecast_series)]
+            historical_data = [[str(date), price] for date, price in zip(prices.index, prices)]
+
+            line_chart = (
+                Calendar()
+                .add("Historical Price", historical_data, calendar_opts=opts.CalendarOpts(range_=str(start_date.year)))
+                .add("Forecasted Price", forecast_data, calendar_opts=opts.CalendarOpts(range_=str(forecast_end_date.year)))
+                .set_global_opts(
+                    title_opts=opts.TitleOpts(title=f'{ticker} Price Forecast'),
+                    visualmap_opts=opts.VisualMapOpts(
+                        max_=max(forecast_series.max(), prices.max()),
+                        min_=min(forecast_series.min(), prices.min()),
+                        orient="horizontal",
+                        is_piecewise=False,
+                        pos_top="230px",
+                        pos_left="100px",
+                    ),
+                    xaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(color='white')),
+                    yaxis_opts=opts.AxisOpts(axislabel_opts=opts.LabelOpts(color='white'))
+                )
+            )
+
+            # Plotly chart for forecasted prices
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=forecast_series.index, y=forecast_series, mode='lines', name='Forecasted Prices'))
+            fig2.update_layout(title=f'{ticker} Forecasted Prices', xaxis_title='Date', yaxis_title='Price')
+
+            st_pyecharts(line_chart)
+            st.plotly_chart(fig2, use_container_width=True)
+
+            # Plotly chart for historical and forecasted prices
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(x=prices.index, y=prices, mode='lines', name='Historical Prices'))
+            fig3.add_trace(go.Scatter(x=forecast_series.index, y=forecast_series, mode='lines', name='Forecasted Prices', line=dict(dash='dash')))
+            fig3.update_layout(title=f'{ticker} Historical and Forecasted Prices', xaxis_title='Date', yaxis_title='Price')
+            st.plotly_chart(fig3)
+
+        # Tabs for different sections
+        pricing_data, fundamental_data, news = st.tabs(["Pricing Data", "Fundamental Data", "Top 10 News"])
+
+        with pricing_data:
+            st.header('Price Movements')
+            data2 = data.copy()
+            data2['% Change'] = data['Adj Close'] / data['Adj Close'].shift(1) - 1
+            data2.dropna(inplace=True)
+            st.write(data2)
+            annual_return = data2['% Change'].mean() * 252 * 100
+            st.write('Annual Return is ', annual_return, '%')
+            stdev = np.std(data2['% Change']) * np.sqrt(252)
+            st.write('Standard Deviation is ', stdev * 100, '%')
+            st.write('Risk Adj. Return is ', annual_return / (stdev * 100))
+
+        with fundamental_data:
+            key = 'KYQBHHQIE1L6HPIY'
+            fd = FundamentalData(key, output_format='pandas')
+            st.subheader('Balance Sheet')
+            balance_sheet = fd.get_balance_sheet_annual(ticker)[0]
+            bs = balance_sheet.T[2:]
+            bs.columns = list(balance_sheet.T.iloc[0])
+            st.write(bs)
+            st.subheader('Income Statement')
+            income_statement = fd.get_income_statement_annual(ticker)[0]
+            is1 = income_statement.T[2:]
+            is1.columns = list(income_statement.T.iloc[0])
+            st.write(is1)
+            st.subheader('Cash Flow Statement')
+            cash_flow = fd.get_cash_flow_annual(ticker)[0]
+            cf = cash_flow.T[2:]
+            cf.columns = list(cash_flow.T.iloc[0])
+            st.write(cf)
+
+        with news:
+            st.header(f'News of {ticker}')
+            sn = StockNews(ticker, save_news=False)
+            df_news = sn.read_rss()
+            for i in range(10):
+                st.subheader(f'News {i + 1}')
+                st.write(df_news['published'][i])
+                st.write(df_news['title'][i])
+                st.write(df_news['summary'][i])
+                title_sentiment = df_news['sentiment_title'][i]
+                st.write(f'Title Sentiment {title_sentiment}')
+                news_sentiment = df_news['sentiment_summary'][i]
+                st.write(f'News Sentiment {news_sentiment}')
+
+    except Exception as e:
+        st.error(f"Error occurred: {e}")
